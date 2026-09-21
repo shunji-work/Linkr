@@ -1,4 +1,4 @@
-import { createInterface } from "node:readline/promises";
+import { createInterface, type Interface } from "node:readline/promises";
 import { execSync } from "node:child_process";
 
 // APIから返ってくるJSONのうち、使う部分だけの型
@@ -8,20 +8,21 @@ type PlaylistItemsResponse = {
 };
 
 // ===== ② 取ってきて、URLの一覧にする(React版でも使い回す) =====
-//渡すもの:APIキー、再生リストID、何番目から、何番目まで
+//渡すもの:APIキー、再生リストID、何番目から、何番目まで(省略したら最後まで)
 //返すもの:URLの一覧
 async function fetchPlaylistVideoUrls(
     apiKey: string,
     playlistId: string,
     startPosition: number,
-    endPosition: number
+    endPosition?: number
 ): Promise<string[]> {
     //  届いたデータは実行が終わるまでためておく
     const videoIds: string[] = [];
     let pageToken: string | undefined = undefined;
 
-    //  ためた件数が「何番目まで」以上になったら止める
-    while (videoIds.length < endPosition) {
+    //  「何番目まで」が決まっていれば、ためた件数がそこに届いたら止める
+    //  決まっていなければ、nextPageTokenが届かなくなるまで回す
+    while (endPosition === undefined || videoIds.length < endPosition) {
         //apiに送るリクエストを作って送る
         const params = new URLSearchParams({
             part: "contentDetails",
@@ -52,6 +53,7 @@ async function fetchPlaylistVideoUrls(
     }
 
     //ためたデータから「何番目から何番目まで」を切り出す
+    //endPositionが未指定のときは、sliceは最後まで切り出してくれる
     //動画IDを https://www.youtube.com/watch?v=動画ID の形にする
     return videoIds
         .slice(startPosition - 1, endPosition)
@@ -65,25 +67,9 @@ function copyUrlsToClipboard(videoUrls: string[]) {
     execSync("pbcopy", { input: text });
 }
 
-async function main() {
-    // ===== ① 入力を受け取る(ターミナル版) =====
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-
-    //ターミナルで再生リストのリンクを入力させる
-    //おかしな入力なら、その場でもう一度聞き直す
-    let playlistId: string | null = null;
-    while (!playlistId) {
-        const playlistUrl = await rl.question("再生リストのURL: ");
-        if (!URL.canParse(playlistUrl)) {
-            console.log("URLの形になっていません。もう一度入力してください。");
-            continue;
-        }
-        playlistId = new URL(playlistUrl).searchParams.get("list");
-        if (!playlistId) {
-            console.log("再生リストのURLではありません。もう一度入力してください。");
-        }
-    }
-
+// ===== ① のうち「何番目から何番目まで」を聞く部分(ターミナル版) =====
+//範囲を指定するときだけ呼ぶ
+async function askRange(rl: Interface): Promise<{ startPosition: number; endPosition: number }> {
     //何番目から何番目までかを入力させる
     let startPosition: number | null = null;
     while (startPosition === null) {
@@ -111,6 +97,48 @@ async function main() {
         endPosition = endNumber;
     }
 
+    return { startPosition, endPosition };
+}
+
+async function main() {
+    // ===== ① 入力を受け取る(ターミナル版) =====
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+
+    //ターミナルで再生リストのリンクを入力させる
+    //おかしな入力なら、その場でもう一度聞き直す
+    let playlistId: string | null = null;
+    while (!playlistId) {
+        const playlistUrl = await rl.question("再生リストのURL: ");
+        if (!URL.canParse(playlistUrl)) {
+            console.log("URLの形になっていません。もう一度入力してください。");
+            continue;
+        }
+        playlistId = new URL(playlistUrl).searchParams.get("list");
+        if (!playlistId) {
+            console.log("再生リストのURLではありません。もう一度入力してください。");
+        }
+    }
+
+    //全部取るか、範囲を指定するかを選ばせる
+    let fetchAll: boolean | null = null;
+    while (fetchAll === null) {
+        const modeInput = await rl.question("全部取りますか?\n  1: 全部\n  2: 範囲を指定\n選択(1/2): ");
+        if (modeInput === "1") {
+            fetchAll = true;
+        } else if (modeInput === "2") {
+            fetchAll = false;
+        } else {
+            console.log("1 か 2 で入力してください。");
+        }
+    }
+
+    //全部モードなら1番目から、終わりまで(endPositionは決めない)
+    let startPosition = 1;
+    let endPosition: number | undefined;
+    if (!fetchAll) {
+        ({ startPosition, endPosition } = await askRange(rl));
+    }
+
     rl.close();
 
     // ===== ② を呼び出す =====
@@ -122,7 +150,7 @@ async function main() {
     const videoUrls = await fetchPlaylistVideoUrls(apiKey, playlistId, startPosition, endPosition);
 
     if (videoUrls.length === 0) {
-        console.log("指定した範囲に動画がありませんでした。");
+        console.log(fetchAll ? "再生リストに動画がありませんでした。" : "指定した範囲に動画がありませんでした。");
         return;
     }
 
