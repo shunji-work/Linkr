@@ -1,87 +1,10 @@
+// ===== ターミナル版の入口 =====
+// 画面とのやり取り(入力・クリップボード)だけを置く
+// 再生リストを取ってくる部分は src/youtube.ts にあり、React版でもそのまま使える
+
 import { createInterface, type Interface } from "node:readline/promises";
 import { execSync } from "node:child_process";
-
-// APIから返ってくるJSONのうち、使う部分だけの型
-type PlaylistItemsResponse = {
-    nextPageToken?: string;
-    items: { contentDetails: { videoId: string } }[];
-};
-
-// ===== ② 取ってきて、URLの一覧にする(React版でも使い回す) =====
-//渡すもの:APIキー、再生リストID、何番目から、何番目まで(省略したら最後まで)
-//返すもの:URLの一覧
-async function fetchPlaylistVideoUrls(
-    apiKey: string,
-    playlistId: string,
-    startPosition: number,
-    endPosition?: number
-): Promise<string[]> {
-    //  届いたデータは実行が終わるまでためておく
-    const videoIds: string[] = [];
-    let pageToken: string | undefined = undefined;
-
-    //  「何番目まで」が決まっていれば、ためた件数がそこに届いたら止める
-    //  決まっていなければ、nextPageTokenが届かなくなるまで回す
-    while (endPosition === undefined || videoIds.length < endPosition) {
-        //apiに送るリクエストを作って送る
-        const params = new URLSearchParams({
-            part: "contentDetails",
-            playlistId: playlistId,
-            maxResults: "50",
-            key: apiKey,
-        });
-        //  止めないときは、nextPageTokenをpageTokenに付けて次のリクエストを送る
-        if (pageToken) {
-            params.set("pageToken", pageToken);
-        }
-
-        const response = await fetch(`https://www.googleapis.com/youtube/v3/playlistItems?${params}`);
-        if (!response.ok) {
-            throw new Error(`APIエラー(${response.status}):再生リストが存在しないか、非公開の可能性があります`);
-        }
-
-        const data: PlaylistItemsResponse = await response.json();
-        const countBeforeThisPage = videoIds.length;
-        for (const item of data.items) {
-            videoIds.push(item.contentDetails.videoId);
-        }
-
-        //  nextPageTokenが届かなかったら止める
-        //  動画が1件も増えなかったときも止める(同じページが返り続けても回り続けないための保険)
-        if (!data.nextPageToken || videoIds.length === countBeforeThisPage) {
-            break;
-        }
-        pageToken = data.nextPageToken;
-    }
-
-    //ためたデータから「何番目から何番目まで」を切り出す
-    //endPositionが未指定のときは、sliceは最後まで切り出してくれる
-    //動画IDを https://www.youtube.com/watch?v=動画ID の形にする
-    return videoIds
-        .slice(startPosition - 1, endPosition)
-        .map((videoId) => `https://www.youtube.com/watch?v=${videoId}`);
-}
-
-// ===== ②' 入力された再生リストが本当に使えるかを、1件だけ試しに取って確かめる =====
-//返すもの:使えるならnull、入力し直せば直るならその理由(メッセージ)
-//入力し直しても直らないもの(キーが違う、クォータ切れ、通信できない等)はエラーを投げて終わる
-async function findPlaylistProblem(apiKey: string, playlistId: string): Promise<string | null> {
-    const params = new URLSearchParams({
-        part: "contentDetails",
-        playlistId: playlistId,
-        maxResults: "1",
-        key: apiKey,
-    });
-
-    const response = await fetch(`https://www.googleapis.com/youtube/v3/playlistItems?${params}`);
-    if (response.ok) {
-        return null;
-    }
-    if (response.status === 404) {
-        return "その再生リストが見つかりません。非公開か、URLが違う可能性があります。";
-    }
-    throw new Error(`APIエラー(${response.status}):再生リストを取得できませんでした`);
-}
+import { extractPlaylistId, fetchPlaylistVideoUrls, findPlaylistProblem } from "./src/youtube";
 
 // ===== ③ 出力する(ターミナル版) =====
 //URLの一覧を箇条書きにしてpbcopyでクリップボードに入れる
@@ -143,7 +66,7 @@ async function main() {
             console.log("URLの形になっていません。もう一度入力してください。");
             continue;
         }
-        playlistId = new URL(playlistUrl).searchParams.get("list");
+        playlistId = extractPlaylistId(playlistUrl);
         if (!playlistId) {
             console.log("再生リストのURLではありません。もう一度入力してください。");
             continue;
