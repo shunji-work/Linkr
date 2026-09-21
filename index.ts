@@ -41,12 +41,14 @@ async function fetchPlaylistVideoUrls(
         }
 
         const data: PlaylistItemsResponse = await response.json();
+        const countBeforeThisPage = videoIds.length;
         for (const item of data.items) {
             videoIds.push(item.contentDetails.videoId);
         }
 
         //  nextPageTokenが届かなかったら止める
-        if (!data.nextPageToken) {
+        //  動画が1件も増えなかったときも止める(同じページが返り続けても回り続けないための保険)
+        if (!data.nextPageToken || videoIds.length === countBeforeThisPage) {
             break;
         }
         pageToken = data.nextPageToken;
@@ -58,6 +60,27 @@ async function fetchPlaylistVideoUrls(
     return videoIds
         .slice(startPosition - 1, endPosition)
         .map((videoId) => `https://www.youtube.com/watch?v=${videoId}`);
+}
+
+// ===== ②' 入力された再生リストが本当に使えるかを、1件だけ試しに取って確かめる =====
+//返すもの:使えるならnull、入力し直せば直るならその理由(メッセージ)
+//入力し直しても直らないもの(キーが違う、クォータ切れ、通信できない等)はエラーを投げて終わる
+async function findPlaylistProblem(apiKey: string, playlistId: string): Promise<string | null> {
+    const params = new URLSearchParams({
+        part: "contentDetails",
+        playlistId: playlistId,
+        maxResults: "1",
+        key: apiKey,
+    });
+
+    const response = await fetch(`https://www.googleapis.com/youtube/v3/playlistItems?${params}`);
+    if (response.ok) {
+        return null;
+    }
+    if (response.status === 404) {
+        return "その再生リストが見つかりません。非公開か、URLが違う可能性があります。";
+    }
+    throw new Error(`APIエラー(${response.status}):再生リストを取得できませんでした`);
 }
 
 // ===== ③ 出力する(ターミナル版) =====
@@ -101,6 +124,13 @@ async function askRange(rl: Interface): Promise<{ startPosition: number; endPosi
 }
 
 async function main() {
+    //APIキーが無いと何もできないので、入力を聞く前に確かめる
+    const apiKey = process.env.VITE_YOUTUBE_API_KEY;
+    if (!apiKey) {
+        console.log(".env に VITE_YOUTUBE_API_KEY がありません。");
+        return;
+    }
+
     // ===== ① 入力を受け取る(ターミナル版) =====
     const rl = createInterface({ input: process.stdin, output: process.stdout });
 
@@ -116,6 +146,14 @@ async function main() {
         playlistId = new URL(playlistUrl).searchParams.get("list");
         if (!playlistId) {
             console.log("再生リストのURLではありません。もう一度入力してください。");
+            continue;
+        }
+
+        //URLの形は合っていても、その再生リストが実際に取れるとは限らないのでここで確かめる
+        const problem = await findPlaylistProblem(apiKey, playlistId);
+        if (problem) {
+            console.log(`${problem}もう一度入力してください。`);
+            playlistId = null;
         }
     }
 
@@ -142,11 +180,6 @@ async function main() {
     rl.close();
 
     // ===== ② を呼び出す =====
-    const apiKey = process.env.VITE_YOUTUBE_API_KEY;
-    if (!apiKey) {
-        console.log(".env に VITE_YOUTUBE_API_KEY がありません。");
-        return;
-    }
     const videoUrls = await fetchPlaylistVideoUrls(apiKey, playlistId, startPosition, endPosition);
 
     if (videoUrls.length === 0) {
@@ -159,4 +192,8 @@ async function main() {
     console.log(`${videoUrls.length}件のURLをクリップボードにコピーしました。`);
 }
 
-main();
+//取得の途中で失敗したとき(クォータ切れ、通信断など)に、長いエラー表示ではなく理由の1行だけ出す
+main().catch((error) => {
+    console.log(error instanceof Error ? error.message : error);
+    process.exit(1);
+});
